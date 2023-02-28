@@ -1,6 +1,6 @@
 # Interactive Sentiment Analysis
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](elliottfairhall-stock-analysis-tool-main-pgogm7.streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://elliottfairhall-interactive-sentiment-analysis-main-62u54w.streamlit.app/)
 
 Interactive Sentiment Analysis is a Python application that performs sentiment analysis on user-provided text and presents the results in a range of charts and visuals. The application determines the overall sentiment of the text, calculates a polarity and subjectivity score, identifies and extracts named entities, and provides insights into the top 10 keywords discussed in the input text.
 
