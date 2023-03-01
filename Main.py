@@ -130,8 +130,11 @@ with st.form(key='nlpForm'):
         # provide an information box to introduce polarity score, subjectivity score and sentiment
         st.info("Below you will see the 'Polarity Score', 'Subjectivity Score' and 'Sentiment")
 
+        # provide polarity title result
+        st.write("**Polarity:**")
+
         # provide polarity result
-        st.write("**Polarity:**", polarity)
+        st.info(polarity)
 
         # provide information related to polarity
         st.markdown("""
@@ -142,9 +145,12 @@ with st.form(key='nlpForm'):
         """, unsafe_allow_html=True
         )
 
-        # provide subjectivity result
-        st.write("**Subjectivity:**", subjectivity)
+        # provide subjectivity title result
+        st.write("**Subjectivity:**")
         
+        # provide subjectivity result
+        st.info(subjectivity)
+    
         # provide information related to subjectivity
         st.markdown("""
         <p>A subjectivity score is a value between 0 and 1 which indicates the subjectivity of a text. 
