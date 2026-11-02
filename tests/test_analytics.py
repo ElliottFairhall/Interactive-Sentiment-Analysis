@@ -1,6 +1,5 @@
 """Unit tests for the analytics module."""
 
-
 from utils.analytics import (
     analyze_sentiment_textblob,
     analyze_sentiment_vader,

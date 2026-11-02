@@ -1,12 +1,17 @@
-"""Sentiment analysis and NLP utility functions.
+"""Sentiment analysis and NLP helpers.
 
-This module provides functions for sentiment analysis using TextBlob and VADER,
-keyword extraction, and named entity recognition using spaCy.
+Sentiment comes from TextBlob and VADER, keywords from simple word counts and
+named entities from spaCy. The spaCy model and NLTK stop words load on first
+use, not on import, so importing this module is fast and never touches the
+network.
 """
+
+from __future__ import annotations
 
 import logging
 import re
 from collections import Counter
+from functools import lru_cache
 from typing import TypedDict
 
 import nltk
@@ -17,6 +22,29 @@ from textblob import TextBlob
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 logger = logging.getLogger(__name__)
+
+MAX_CHARS = 20_000
+VADER_BAND = 0.05
+ENTITY_LABELS = {
+    "PERSON": "People",
+    "ORG": "Organisations",
+    "GPE": "Places",
+    "LOC": "Locations",
+    "DATE": "Dates",
+    "TIME": "Times",
+    "MONEY": "Money",
+    "PERCENT": "Percentages",
+    "PRODUCT": "Products",
+    "EVENT": "Events",
+    "NORP": "Groups",
+    "CARDINAL": "Numbers",
+    "ORDINAL": "Ordinals",
+    "QUANTITY": "Quantities",
+    "FAC": "Buildings and sites",
+    "WORK_OF_ART": "Works of art",
+    "LAW": "Laws",
+    "LANGUAGE": "Languages",
+}
 
 
 class TextBlobResult(TypedDict):
@@ -43,14 +71,34 @@ class EntityResult(TypedDict):
     label: str
 
 
-def _load_spacy_model() -> Language:
-    """Load the spaCy English model, downloading if necessary.
+class SentenceScore(TypedDict):
+    """Sentiment of a single sentence."""
+
+    text: str
+    polarity: float
+    sentiment: str
+
+
+class EngineComparison(TypedDict):
+    """Both engines' results and whether their labels match."""
+
+    textblob: TextBlobResult
+    vader: VaderResult
+    agree: bool
+
+
+@lru_cache(maxsize=1)
+def get_nlp() -> Language:
+    """Load the spaCy English model once, downloading it only if missing.
+
+    The model is normally installed as a dependency (see requirements.txt);
+    the download is a fallback for environments that skipped it.
 
     Returns:
-        Loaded spaCy Language model.
+        The loaded spaCy pipeline.
 
     Raises:
-        OSError: If the model cannot be loaded or downloaded.
+        OSError: If the model is missing and cannot be downloaded.
     """
     try:
         return spacy.load("en_core_web_sm")
@@ -62,31 +110,36 @@ def _load_spacy_model() -> Language:
         return spacy.load("en_core_web_sm")
 
 
-# Initialize NLP resources
-nlp = _load_spacy_model()
-nltk.download("stopwords", quiet=True)
-STOP_WORDS: set[str] = set(stopwords.words("english"))
+@lru_cache(maxsize=1)
+def get_stop_words() -> frozenset[str]:
+    """Load NLTK's English stop words once, fetching them if missing.
+
+    Returns:
+        The set of stop words.
+    """
+    try:
+        return frozenset(stopwords.words("english"))
+    except LookupError:
+        nltk.download("stopwords", quiet=True)
+        return frozenset(stopwords.words("english"))
 
 
 def analyze_sentiment_textblob(text: str) -> TextBlobResult:
     """Analyze sentiment using TextBlob.
 
-    TextBlob provides both polarity (emotional lean) and subjectivity
-    (factual vs opinionated) scores for text analysis.
+    TextBlob gives both polarity (emotional lean) and subjectivity (factual
+    versus opinionated). Scores within 0.05 of zero count as Neutral, the
+    same band VADER uses, so the two labels can be compared.
 
     Args:
         text: The text to analyze.
 
     Returns:
-        Dictionary containing:
-            - polarity: Float from -1 (negative) to 1 (positive)
-            - subjectivity: Float from 0 (objective) to 1 (subjective)
-            - sentiment: String classification (Positive, Neutral, Negative)
+        Polarity from -1 to 1, subjectivity from 0 to 1 and a label.
 
     Example:
-        >>> result = analyze_sentiment_textblob("I love this product!")
-        >>> print(result['sentiment'])
-        Positive
+        >>> analyze_sentiment_textblob("I love this product!")["sentiment"]
+        'Positive'
     """
     if not text or not text.strip():
         return {"polarity": 0.0, "subjectivity": 0.0, "sentiment": "Neutral"}
@@ -95,9 +148,9 @@ def analyze_sentiment_textblob(text: str) -> TextBlobResult:
     polarity = blob.sentiment.polarity
     subjectivity = blob.sentiment.subjectivity
 
-    if polarity > 0:
+    if polarity >= VADER_BAND:
         sentiment = "Positive"
-    elif polarity < 0:
+    elif polarity <= -VADER_BAND:
         sentiment = "Negative"
     else:
         sentiment = "Neutral"
@@ -110,25 +163,20 @@ def analyze_sentiment_textblob(text: str) -> TextBlobResult:
 
 
 def analyze_sentiment_vader(text: str) -> VaderResult:
-    """Analyze sentiment using VADER (Valence Aware Dictionary and sEntiment Reasoner).
+    """Analyze sentiment using VADER.
 
-    VADER is particularly effective for social media text and provides
-    detailed sentiment scores including compound, positive, negative, and neutral.
+    VADER is tuned for short, informal text and returns a compound score plus
+    the positive, negative and neutral shares.
 
     Args:
         text: The text to analyze.
 
     Returns:
-        Dictionary containing:
-            - polarity: Float from -1 to 1 (compound score)
-            - subjectivity: None (VADER doesn't provide subjectivity)
-            - sentiment: String classification (Positive, Neutral, Negative)
-            - raw_scores: Dictionary with pos, neg, neu, and compound scores
+        The compound score as ``polarity``, a label and the raw scores.
 
     Example:
-        >>> result = analyze_sentiment_vader("This is absolutely amazing!")
-        >>> print(result['sentiment'])
-        Positive
+        >>> analyze_sentiment_vader("This is absolutely amazing!")["sentiment"]
+        'Positive'
     """
     if not text or not text.strip():
         return {
@@ -138,13 +186,12 @@ def analyze_sentiment_vader(text: str) -> VaderResult:
             "raw_scores": {"pos": 0.0, "neg": 0.0, "neu": 1.0, "compound": 0.0},
         }
 
-    analyzer = SentimentIntensityAnalyzer()
-    scores = analyzer.polarity_scores(text)
+    scores = SentimentIntensityAnalyzer().polarity_scores(text)
     compound = scores["compound"]
 
-    if compound >= 0.05:
+    if compound >= VADER_BAND:
         sentiment = "Positive"
-    elif compound <= -0.05:
+    elif compound <= -VADER_BAND:
         sentiment = "Negative"
     else:
         sentiment = "Neutral"
@@ -158,59 +205,146 @@ def analyze_sentiment_vader(text: str) -> VaderResult:
 
 
 def get_word_frequency(text: str, n_top: int = 10) -> dict[str, int]:
-    """Extract the most frequent words from text, excluding stopwords.
-
-    Tokenizes text and counts word frequencies, filtering out common
-    English stopwords and single-character tokens.
+    """Count the most frequent words, ignoring stop words and single letters.
 
     Args:
         text: The text to analyze.
-        n_top: Number of top keywords to return. Defaults to 10.
+        n_top: Number of top words to return.
 
     Returns:
-        Dictionary mapping words to their frequency counts,
-        sorted by frequency in descending order.
+        Words mapped to counts, most frequent first.
 
     Example:
-        >>> freq = get_word_frequency("The quick brown fox jumps over the lazy dog")
-        >>> print(list(freq.keys())[:3])
-        ['quick', 'brown', 'fox']
+        >>> list(get_word_frequency("The quick brown fox jumps over the lazy dog"))[:2]
+        ['quick', 'brown']
     """
     if not text or not text.strip():
         return {}
 
+    stop_words = get_stop_words()
     words = re.findall(r"\b\w+\b", text.lower())
-    words = [word for word in words if word not in STOP_WORDS and len(word) > 1]
-    word_counts = Counter(words)
-    return dict(word_counts.most_common(n_top))
+    words = [word for word in words if word not in stop_words and len(word) > 1]
+    return dict(Counter(words).most_common(n_top))
 
 
 def get_named_entities(text: str) -> list[EntityResult]:
-    """Extract named entities from text using spaCy NER.
-
-    Identifies and classifies named entities such as people, organizations,
-    locations, dates, and other categories.
+    """Extract named entities with spaCy.
 
     Args:
         text: The text to analyze.
 
     Returns:
-        List of dictionaries, each containing:
-            - text: The entity text
-            - label: The entity type (PERSON, ORG, GPE, DATE, etc.)
+        One dict per entity with its ``text`` and ``label`` (PERSON, ORG, GPE...).
 
     Example:
-        >>> entities = get_named_entities("Apple Inc. was founded by Steve Jobs.")
-        >>> print([e['label'] for e in entities])
+        >>> found = get_named_entities("Apple Inc. was founded by Steve Jobs.")
+        >>> [e["label"] for e in found]
         ['ORG', 'PERSON']
     """
     if not text or not text.strip():
         return []
+    return [{"text": ent.text, "label": ent.label_} for ent in get_nlp()(text).ents]
 
-    doc = nlp(text)
-    entities: list[EntityResult] = []
 
-    for ent in doc.ents:
-        entities.append({"text": ent.text, "label": ent.label_})
+def split_sentences(text: str) -> list[str]:
+    """Split text into sentences with spaCy.
 
-    return entities
+    Args:
+        text: The text to split.
+
+    Returns:
+        Non-empty, stripped sentences in order.
+    """
+    if not text or not text.strip():
+        return []
+    return [s.text.strip() for s in get_nlp()(text).sents if s.text.strip()]
+
+
+def score_sentences(text: str, engine: str = "VADER") -> list[SentenceScore]:
+    """Score every sentence, to show where the tone shifts.
+
+    Args:
+        text: The text to analyze.
+        engine: ``"VADER"`` or ``"TextBlob"``.
+
+    Returns:
+        One score per sentence, in reading order.
+    """
+    analyse = (
+        analyze_sentiment_vader if engine == "VADER" else analyze_sentiment_textblob
+    )
+    scored: list[SentenceScore] = []
+    for sentence in split_sentences(text):
+        result = analyse(sentence)
+        scored.append(
+            {
+                "text": sentence,
+                "polarity": result["polarity"],
+                "sentiment": result["sentiment"],
+            }
+        )
+    return scored
+
+
+def compare_engines(text: str) -> EngineComparison:
+    """Run both engines and say whether they agree.
+
+    Args:
+        text: The text to analyze.
+
+    Returns:
+        ``textblob`` and ``vader`` results plus ``agree``, true when both give
+        the same label.
+    """
+    blob = analyze_sentiment_textblob(text)
+    vader = analyze_sentiment_vader(text)
+    return {
+        "textblob": blob,
+        "vader": vader,
+        "agree": blob["sentiment"] == vader["sentiment"],
+    }
+
+
+def text_stats(text: str) -> dict[str, float]:
+    """Basic size and readability figures.
+
+    Args:
+        text: The text to measure.
+
+    Returns:
+        ``words``, ``sentences``, ``words_per_sentence`` and ``unique_share``
+        (the fraction of words that are distinct).
+    """
+    words = re.findall(r"\b\w+\b", text.lower())
+    sentences = len(split_sentences(text))
+    return {
+        "words": len(words),
+        "sentences": sentences,
+        "words_per_sentence": len(words) / sentences if sentences else 0.0,
+        "unique_share": len(set(words)) / len(words) if words else 0.0,
+    }
+
+
+def sentiment_words(text: str, limit: int = 12) -> dict[str, float]:
+    """Find the words that push VADER's score up or down.
+
+    Looks each word up in VADER's sentiment dictionary, so this shows why a
+    text scored the way it did. Negation and intensifiers are not applied here;
+    it is a reading aid, not the score itself.
+
+    Args:
+        text: The text to analyze.
+        limit: Maximum number of words to return.
+
+    Returns:
+        Words mapped to their dictionary valence (about -4 to +4), strongest
+        first, each word listed once.
+    """
+    lexicon = SentimentIntensityAnalyzer().lexicon
+    found: dict[str, float] = {}
+    for token in re.findall(r"[\w']+", text.lower()):
+        valence = lexicon.get(token, 0.0)
+        if valence and token not in found:
+            found[token] = float(valence)
+    ranked = sorted(found.items(), key=lambda item: abs(item[1]), reverse=True)
+    return dict(ranked[:limit])
